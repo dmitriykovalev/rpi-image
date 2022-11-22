@@ -3,6 +3,7 @@
 import argparse
 import collections
 import contextlib
+import functools
 import json
 import os
 import pathlib
@@ -33,6 +34,27 @@ Run inside docker container:
 
 SFDISK = '/sbin/sfdisk'
 
+Partition = collections.namedtuple('Partition', ['number', 'offset', 'size'])
+Mount = collections.namedtuple('Mount', ['host_path', 'image_path', 'read_only'])
+
+def make_mount(s, read_only):
+  parts = s.split(':')
+  if len(parts) == 1:
+    host_path = image_path = pathlib.Path(parts[0])
+  elif len(parts) == 2:
+    host_path = pathlib.Path(parts[0])
+    image_path = pathlib.Path(parts[1])
+  else:
+    return ValueError('invalid format: %s' % s)
+
+  if not host_path.exists():
+    raise ValueError('host path does not exist: %s' % host_path)
+
+  if not image_path.is_absolute():
+    raise ValueError('image path must be absolute: %s' % image_path)
+
+  return Mount(host_path, image_path, read_only)
+
 def chroot(root_dir, cmd):
   return subprocess.call(['chroot', '.'] + cmd, cwd=root_dir)
 
@@ -44,6 +66,43 @@ def umount(mount_point, attempts=5, timeout=0.1):
       return
     except subprocess.CalledProcessError:
       time.sleep(timeout)
+
+def split_existing(path):
+    suffix = pathlib.Path()
+    while not path.exists():
+      suffix = path.name / suffix
+      path = path.parent
+    return path, suffix
+
+@contextlib.contextmanager
+def mount_point(path, as_file):
+  existing, missing = split_existing(path)
+
+  if not missing.parts:
+    yield
+  else:
+    if as_file:
+      if len(missing.parts) == 1:
+        path.touch()
+        try:
+          yield
+        finally:
+          path.unlink()
+      else:
+        assert len(missing.parts) > 1
+        path.parent.mkdir(parents=True)
+        path.touch()
+        try:
+          yield
+        finally:
+          shutil.rmtree(existing / missing.parts[0])
+    else:
+      assert len(missing.parts) > 0
+      path.mkdir(parents=True)
+      try:
+        yield
+      finally:
+        shutil.rmtree(existing / missing.parts[0])
 
 @contextlib.contextmanager
 def loop_dev(image_file, offset=0):
@@ -65,34 +124,21 @@ def loop_mount(image_file, mount_dir, offset, read_only):
       umount(mount_dir)
 
 @contextlib.contextmanager
-def bind_mount(old_dir, new_dir, read_only):
-  options = ['-o', 'ro'] if read_only else []
-  subprocess.check_call(['mount'] + options + ['--bind', old_dir, new_dir])
-  try:
-    yield new_dir
-  finally:
-    umount(new_dir)
-
-@contextlib.contextmanager
-def mount_point(path):
-  def find_existing(path):
-    name = None
-    while path:
-      if os.path.exists(path):
-        return (path, name)
-      path, name = os.path.split(path)
-
-  existing_path, name = find_existing(path)
-  if name:
-    os.makedirs(path)
-    try:
-      yield
-    finally:
-      shutil.rmtree(os.path.join(existing_path, name))
+def bind_mount(host_path, image_path, read_only):
+  if host_path.is_dir():
+    as_file = False
+  elif host_path.is_file():
+    as_file = True
   else:
-    yield
+    raise ValueError('host path does not exist')
 
-Partition = collections.namedtuple('Partition', ['number', 'offset', 'size'])
+  with mount_point(image_path, as_file):
+    options = ['-o', 'ro'] if read_only else []
+    subprocess.check_call(['mount'] + options + ['--bind', host_path, image_path])
+    try:
+      yield image_path
+    finally:
+      umount(image_path)
 
 def read_partitions(image_file):
   output = subprocess.check_output([SFDISK, '-J', image_file])
@@ -108,7 +154,7 @@ def read_partitions(image_file):
   return list(partitions())
 
 @contextlib.contextmanager
-def mount_image(image_file, root_dir, mounts, read_only=False):
+def mount_image(image_file, root_dir, mounts, read_only):
   partitions = read_partitions(image_file)
 
   assert(len(partitions) >= 2)
@@ -122,13 +168,10 @@ def mount_image(image_file, root_dir, mounts, read_only=False):
                                    root_partition.offset, read_only))
     stack.enter_context(loop_mount(image_file, root_dir / 'boot',
                                    boot_partition.offset, read_only))
-    for host_path, img_path in mounts:
-      assert os.path.exists(host_path)
-      assert os.path.isabs(img_path)
-      abs_img_path = os.path.join(root_dir, img_path[1:])
-      #print('Bind mount: %s => %s' % (host_path, abs_img_path))
-      stack.enter_context(mount_point(abs_img_path))
-      stack.enter_context(bind_mount(host_path, abs_img_path, read_only))
+    for m in mounts:
+      stack.enter_context(bind_mount(m.host_path,
+                                     root_dir / m.image_path.relative_to('/'),
+                                     m.read_only))
     yield root_dir
 
 @contextlib.contextmanager
@@ -195,16 +238,14 @@ def subcommand_expand(args):
     subprocess.check_call(['resize2fs', dev])
 
 def subcommand_mount(args):
-  with mount_dir(args.root) as root_dir:
+  with mount_dir(args.directory) as root_dir:
     with mount_image(args.image, root_dir, [], args.read_only):
       subprocess.run(args.command, cwd=root_dir)
 
 def subcommand_run(args):
-  mounts = [('/dev', '/dev'),
-            ('/sys', '/sys'),
-            ('/proc', '/proc'),
-            ('/dev/pts', '/dev/pts')]
-  mounts += [tuple(mount.split(':')) for mount in (args.volume or [])]
+  mounts = [make_mount(s, read_only=True) for s in ('/dev', '/sys', '/proc', '/dev/pts')]
+  mounts += (args.bind or [])
+  mounts += (args.bind_ro or [])
 
   if args.user:
     command = ['su', '-l', args.user]
@@ -213,7 +254,7 @@ def subcommand_run(args):
   else:
     command = args.command
 
-  with mount_dir(args.root) as root_dir:
+  with mount_dir(args.directory) as root_dir:
     with mount_image(args.image, root_dir, mounts, args.read_only) as root_dir:
       with disable_ld_preload(root_dir):
         chroot(root_dir, command)
@@ -229,6 +270,12 @@ def existing_dir(s):
   if not path.is_dir():
     raise argparse.ArgumentTypeError('directory does not exist: %s' % s)
   return path
+
+def valid_mount(s, read_only):
+  try:
+    return make_mount(s, read_only)
+  except ValueError as e:
+    raise argparse.ArgumentTypeError(str(e))
 
 def expand_size(s):
   UNIT_MULTIPLIER = {
@@ -271,16 +318,26 @@ def main():
   mount_parser.set_defaults(func=subcommand_mount, requires_root=True)
 
   run_parser = subparsers.add_parser('run', help='run command inside image')
-  run_parser.add_argument('--volume', '-v', action='append', metavar='<host-path>:<image-path>')
+  run_parser.add_argument('--bind', action='append',
+                          type=functools.partial(valid_mount, read_only=False),
+                          metavar='PATH:[PATH]',
+                          help='bind mount a file or directory from the host into the image')
+  run_parser.add_argument('--bind-ro', action='append',
+                          type=functools.partial(valid_mount, read_only=True),
+                          metavar='PATH:[PATH]',
+                          help='similar, but creates a read-only bind mount')
   run_parser.add_argument('--user', '-u', help='run as logged in user')
   run_parser.set_defaults(func=subcommand_run, requires_root=True)
 
   for p in info_parser, expand_parser, mount_parser, run_parser:
-    p.add_argument('--image', '-i', type=existing_file, metavar='FILE', required=True, help='image file (.img)')
+    p.add_argument('--image', '-i', type=existing_file, metavar='FILE',
+                   required=True, help='image file (.img)')
 
   for p in mount_parser, run_parser:
-    p.add_argument('--read-only', '-ro', action='store_true', help='read-only mount')
-    p.add_argument('--root', '-r', type=existing_dir, metavar='DIR', help='image mount directory')
+    p.add_argument('--read-only', action='store_true',
+                   help='mount the root directory read-only')
+    p.add_argument('--directory', '-D', type=existing_dir, metavar='DIR',
+                   help='root directory for the image')
     p.add_argument('command', nargs='*', help='command to execute')
 
   args = parser.parse_args()
