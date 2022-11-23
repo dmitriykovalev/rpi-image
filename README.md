@@ -1,29 +1,48 @@
 # rpi-image
 
+## urls
+
+List available [Raspberry Pi OS](https://www.raspberrypi.com/software/operating-systems/) image file URLs:
+```
+./rpi-image urls
+```
+
 ## list
 
-List available [Raspberry Pi OS](https://www.raspberrypi.com/software/operating-systems/) images:
+List image partitions:
 ```
-./rpi-image list
-```
-
-## info
-
-Show partition info:
-```
-./rpi-image info -i test.img
+sudo ./rpi-image list -i test.img
 ```
 
 ## expand
 
-Expand last partition by `128M`:
+Expand last partition size by `128M`:
 ```
-sudo ./rpi-image expand -i test.img -s +128M1
+sudo ./rpi-image expand -i test.img -s +128M
 ```
 
-Set last partition to `2G` (must be bigger than current size):
+Set last partition size to `2G` (must be bigger than the current size):
 ```
 sudo ./rpi-image expand -i test.img -s 2G
+```
+
+## append
+
+Append new `128M` partition:
+```
+sudo ./rpi-image append -i test.img -s 128M
+```
+
+Append new `1G` partition, setup `ext4` filesystem, use `data` as volume label:
+```
+sudo ./rpi-image append -i test.img -s 1G -fs ext4 -l data
+```
+
+## delete
+
+Delete last partition:
+```
+sudo ./rpi-image delete -i test.img
 ```
 
 ## run
