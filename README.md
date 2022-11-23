@@ -69,6 +69,21 @@ sudo ./rpi-image run -i test.img -u pi pwd
 sudo ./rpi-image run -i test.img -u pi -- ls -la
 ```
 
+Run shell script inside the image:
+```
+cat script.sh | sudo ./rpi-image run -i test.img -- /bin/bash
+```
+
+Run shell script with arguments inside the image:
+```
+cat script.sh | sudo ./rpi-image run -i test.img -- /bin/bash -s - arg1 arg2
+```
+
+Run shell script with arguments inside the image by mounting shell script file:
+```
+sudo ./rpi-image run -i test.img --bind-ro script.sh:/script.sh -- /script.sh arg1 arg2 arg3
+```
+
 Enable ssh:
 ```
 sudo ./rpi-image run -i test.img touch /boot/ssh
