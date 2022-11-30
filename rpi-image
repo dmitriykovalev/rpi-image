@@ -140,7 +140,8 @@ def mount_point(path, as_file):
 @contextlib.contextmanager
 def loop_dev(image_file, offset):
   cmd = ['losetup', '--find', '--show', '--offset', str(offset), image_file]
-  dev = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip()
+  process = subprocess.run(cmd, check=True, capture_output=True, text=True)
+  dev = process.stdout.strip()
   try:
     yield dev
   finally:
@@ -149,8 +150,10 @@ def loop_dev(image_file, offset):
 @contextlib.contextmanager
 def loop_mount(image_file, mount_dir, offset, read_only):
   with loop_dev(image_file, offset) as dev:
-    options = ['-o', 'ro'] if read_only else []
-    subprocess.run(['mount'] + options + [dev, mount_dir], check=True)
+    cmd = ['mount', dev, mount_dir]
+    if read_only:
+      cmd += ['--options', 'ro']
+    subprocess.run(cmd, check=True)
     try:
       yield mount_dir
     finally:
@@ -166,8 +169,10 @@ def bind_mount(host_path, image_path, read_only):
     raise ValueError('host path does not exist')
 
   with mount_point(image_path, as_file):
-    options = ['-o', 'ro'] if read_only else []
-    subprocess.run(['mount'] + options + ['--bind', host_path, image_path], check=True)
+    cmd = ['mount', '--bind', host_path, image_path]
+    if read_only:
+      cmd += ['--options', 'ro']
+    subprocess.run(cmd, check=True)
     try:
       yield image_path
     finally:
@@ -420,6 +425,12 @@ def existing_dir(s):
     raise argparse.ArgumentTypeError('directory does not exist: %s' % s)
   return path
 
+def valid_mount(s, read_only):
+  try:
+    return make_mount(s, read_only)
+  except ValueError as e:
+    raise argparse.ArgumentTypeError(str(e))
+
 UNIT_MULTIPLIER = {
   '': 1,
   'K': 1024,
@@ -493,11 +504,11 @@ def main():
 
   run_parser = subparsers.add_parser('run', help='run command inside image')
   run_parser.add_argument('--bind', action='append',
-                          type=functools.partial(make_mount, read_only=False),
+                          type=functools.partial(valid_mount, read_only=False),
                           metavar='PATH:[PATH]',
                           help='bind mount a file or directory from the host into the image')
   run_parser.add_argument('--bind-ro', action='append',
-                          type=functools.partial(make_mount, read_only=True),
+                          type=functools.partial(valid_mount, read_only=True),
                           metavar='PATH:[PATH]',
                           help='similar, but creates a read-only bind mount')
   run_parser.add_argument('--user', '-u', help='run as logged in user')
