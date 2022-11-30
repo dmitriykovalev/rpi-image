@@ -289,7 +289,7 @@ def subcommand_urls(args):
   else:
     fields = args.fields.split(',')
     for item in items:
-      print(','.join(item.get(field, '') for field in fields))
+      print(','.join(str(item.get(field, '')) for field in fields))
 
 def subcommand_download(args):
   items = raspios_list(args.suffix)
@@ -299,7 +299,11 @@ def subcommand_download(args):
   item = items[0]
   image_url = item['url']
   image_file_sha256 = item['extract_sha256']
-  image_file = pathlib.Path(image_filename(image_url))
+
+  if args.output:
+    image_file = args.output
+  else:
+    image_file = pathlib.Path(image_filename(image_url))
 
   if image_file.exists():
     sys.exit(f"Image file '{image_file}' already exists.")
@@ -489,6 +493,8 @@ def main():
   urls_parser.set_defaults(func=subcommand_urls, requires_root=False)
 
   download_parser = subparsers.add_parser('download', help='download image file')
+  download_parser.add_argument('--output', '-O', type=pathlib.Path,
+                               help='image file name')
   download_parser.set_defaults(func=subcommand_download, requires_root=False)
 
   for p in urls_parser, download_parser:
