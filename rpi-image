@@ -193,6 +193,21 @@ def read_partitions(image_file):
 
   return list(partitions())
 
+def read_last_partition(image_file):
+  partitions = read_partitions(image_file)
+  if not partitions:
+    sys.exit('Image file has no partitions.')
+  return partitions[-1]
+
+def read_filesystem(image_file, offset):
+  with loop_dev(image_file, offset) as dev:
+    try:
+      stdout = subprocess.run(['blkid', '--probe', '--output', 'export', dev],
+                              check=True, capture_output=True, text=True).stdout
+      return dict(s.split('=') for s in stdout.strip().split('\n'))
+    except subprocess.CalledProcessError:
+      return {}
+
 @contextlib.contextmanager
 def mount_image(image_file, root_dir, mounts, read_only):
   partitions = read_partitions(image_file)
@@ -298,78 +313,71 @@ def subcommand_download(args):
 
 def subcommand_list(args):
   for p in read_partitions(args.image):
-    with loop_dev(args.image, p.start) as dev:
-      try:
-        stdout = subprocess.run(['blkid', '--probe', '--output', 'export', dev],
-                                check=True, capture_output=True, text=True).stdout
-        fs = dict(s.split('=') for s in stdout.strip().split('\n'))
-      except subprocess.CalledProcessError:
-        fs = {}
-
-      print(f'#{p.number}: type={p.type}, start={p.start}, end={p.end}, size={p.size},',
-            f"fs_type={fs.get('TYPE', 'N/A')}, fs_label={fs.get('LABEL', 'N/A')}")
+    fs = read_filesystem(args.image, p.start)
+    print(f'#{p.number}: type={p.type}, start={p.start}, end={p.end}, size={p.size},',
+          f"fs_type={fs.get('TYPE', 'N/A')}, fs_label={fs.get('LABEL', 'N/A')}")
 
 def subcommand_expand(args):
-  partitions = read_partitions(args.image)
-  assert(partitions)
-  last_partition = partitions[-1]
+  last_partition = read_last_partition(args.image)
 
   expand, new_partition_size = args.size
   if expand:
     new_partition_size += last_partition.size
 
   if new_partition_size < last_partition.size:
-    sys.exit('New partition size cannot be smaller.')
+    sys.exit('New partition size cannot become smaller.')
 
   image_size = args.image.stat().st_size
   new_image_size = last_partition.start + new_partition_size
 
-  print('\n=> Adjusting image file size:')
-  print(f'Image file size: {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
+  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
   truncate(args.image, new_image_size)
 
-  print('\n=> Expanding partition size:')
-  print(f'Last partition size: {last_partition.size} -> {new_partition_size} (change: {new_partition_size - last_partition.size}')
+  print(f'=> Expanding last partition (bytes): {last_partition.size} -> {new_partition_size} (change: {new_partition_size - last_partition.size})')
   subprocess.run([SFDISK, '-N', str(last_partition.number), args.image],
                  input=', +', text=True, check=True)
+
+  if not read_filesystem(args.image, last_partition.start):
+    return
+
+  print('=> Expanding filesystem:')
   with loop_dev(args.image, offset=last_partition.start) as dev:
-    print('\n=> Checking filesystem:')
+    print('==> Checking filesystem:')
     subprocess.run(['e2fsck', '-yf', dev], check=True)
-    print('\n=> Resizing filesystem:')
+    print('==> Resizing filesystem:')
     subprocess.run(['resize2fs', dev], check=True)
 
 def subcommand_append(args):
-  partitions = read_partitions(args.image)
-  assert(partitions)
-  last_partition = partitions[-1]
+  last_partition = read_last_partition(args.image)
   sector_size = last_partition.sector_size
   new_partition_size = round_up(args.size, sector_size)
 
   image_size = args.image.stat().st_size
   new_image_size = last_partition.end + new_partition_size
 
-  print('\n=> Adjusting image file size:')
-  print(f'Image file size: {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
+  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
   truncate(args.image, new_image_size)
 
-  print('\n=> Appending partition:')
+  print('=> Appending last partition:')
   subprocess.run([SFDISK, '--append', args.image],
                  input=f'{last_partition.end // sector_size}, {new_partition_size // sector_size}',
                  text=True, check=True)
 
-  if args.filesystem:
-    print('\n=> Creating filesystem:')
-    with loop_dev(args.image, offset=last_partition.end) as dev:
-      cmd = [f'mkfs.{args.filesystem}', dev]
-      if args.label:
-        cmd += ['-L', args.label]
-      subprocess.run(cmd, check=True)
+  if not args.filesystem:
+    return
+
+  print('=> Creating filesystem:')
+  with loop_dev(args.image, offset=last_partition.end) as dev:
+    cmd = [f'mkfs.{args.filesystem}', dev]
+    if args.label:
+      cmd += ['-L', args.label]
+    subprocess.run(cmd, check=True)
 
 def subcommand_delete(args):
   partitions = read_partitions(args.image)
   assert len(partitions) > 2
 
-  print('\n=> Deleting partition:')
+  print('=> Deleting partition:')
   subprocess.run([SFDISK, '--delete', args.image, str(partitions[-1].number)])
   truncate(args.image, partitions[-2].end)
 
