@@ -79,13 +79,13 @@ def make_mount(s, read_only):
     host_path = pathlib.Path(parts[0])
     image_path = pathlib.Path(parts[1])
   else:
-    return ValueError('invalid format: %s' % s)
+    raise ValueError(f'invalid format: {s}')
 
   if not host_path.exists():
-    raise ValueError('host path does not exist: %s' % host_path)
+    raise ValueError(f'host path does not exist: {host_path}')
 
   if not image_path.is_absolute():
-    raise ValueError('image path must be absolute: %s' % image_path)
+    raise ValueError(f'image path must be absolute: {image_path}')
 
   return Mount(host_path, image_path, read_only)
 
