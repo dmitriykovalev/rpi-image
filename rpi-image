@@ -47,6 +47,10 @@ class Partition:
   sector_size: int
 
   @property
+  def end_sectors(self):
+    return self.start_sectors + self.size_sectors
+
+  @property
   def size(self):
     return self.size_sectors * self.sector_size
 
@@ -86,7 +90,7 @@ def make_mount(s, read_only):
   return Mount(host_path, image_path, read_only)
 
 def truncate(path_file, size):
-  subprocess.run(['truncate', path_file, '--size', str(size)], check=True)
+  return subprocess.run(['truncate', path_file, '--size', str(size)], check=True)
 
 def chroot(root_dir, cmd):
   return subprocess.run(['chroot', '.'] + cmd, cwd=root_dir)
@@ -95,8 +99,7 @@ def umount(mount_point, attempts=5, timeout=0.1):
   while attempts > 0:
     try:
       attempts -= 1
-      subprocess.run(['umount', mount_point], check=True)
-      return
+      return subprocess.run(['umount', mount_point], check=True)
     except subprocess.CalledProcessError:
       time.sleep(timeout)
 
@@ -140,7 +143,7 @@ def mount_point(path, as_file):
 @contextlib.contextmanager
 def loop_dev(image_file, offset):
   cmd = ['losetup', '--find', '--show', '--offset', str(offset), image_file]
-  process = subprocess.run(cmd, check=True, capture_output=True, text=True)
+  process = subprocess.run(cmd, capture_output=True, text=True, check=True)
   dev = process.stdout.strip()
   try:
     yield dev
@@ -179,12 +182,12 @@ def bind_mount(host_path, image_path, read_only):
       umount(image_path)
 
 def read_partitions(image_file):
-  output = subprocess.run(['sfdisk', '--list-types'],
-                          check=True, capture_output=True, text=True).stdout
+  output = subprocess.run([SFDISK, '--list-types'],
+                           capture_output=True, text=True, check=True).stdout
   labels = dict(x.strip().split('  ') for x in output.strip().split('\n')[2:])
 
   output = subprocess.run([SFDISK, '--json', image_file],
-                          check=True, capture_output=True, text=True).stdout
+                          capture_output=True, text=True, check=True).stdout
   table = json.loads(output)['partitiontable']
   sector_size = table.get('sectorsize', 512)
 
@@ -208,7 +211,7 @@ def read_filesystem(image_file, offset):
   with loop_dev(image_file, offset) as dev:
     try:
       stdout = subprocess.run(['blkid', '--probe', '--output', 'export', dev],
-                              check=True, capture_output=True, text=True).stdout
+                              capture_output=True, text=True, check=True).stdout
       return dict(s.split('=') for s in stdout.strip().split('\n'))
     except subprocess.CalledProcessError:
       return {}
@@ -335,10 +338,12 @@ def subcommand_expand(args):
   image_size = args.image.stat().st_size
   new_image_size = last_partition.start + new_partition_size
 
-  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
+  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size}',
+        f'(change: {new_image_size - image_size})')
   truncate(args.image, new_image_size)
 
-  print(f'=> Expanding last partition (bytes): {last_partition.size} -> {new_partition_size} (change: {new_partition_size - last_partition.size})')
+  print(f'=> Expanding last partition (bytes): {last_partition.size} -> {new_partition_size}',
+        f'(change: {new_partition_size - last_partition.size})')
   subprocess.run([SFDISK, '-N', str(last_partition.number), args.image],
                  input=', +', text=True, check=True)
 
@@ -354,18 +359,19 @@ def subcommand_expand(args):
 
 def subcommand_append(args):
   last_partition = read_last_partition(args.image)
-  sector_size = last_partition.sector_size
-  new_partition_size = round_up(args.size, sector_size)
+  new_partition_size = round_up(args.size, last_partition.sector_size)
+  new_partition_size_sectors = new_partition_size // last_partition.sector_size
 
   image_size = args.image.stat().st_size
   new_image_size = last_partition.end + new_partition_size
 
-  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size} (change: {new_image_size - image_size})')
+  print(f'=> Expanding image file (bytes): {image_size} -> {new_image_size}',
+        f'(change: {new_image_size - image_size})')
   truncate(args.image, new_image_size)
 
   print('=> Appending last partition:')
   subprocess.run([SFDISK, '--append', args.image],
-                 input=f'{last_partition.end // sector_size}, {new_partition_size // sector_size}',
+                 input=f'{last_partition.end_sectors}, {new_partition_size_sectors}',
                  text=True, check=True)
 
   if not args.filesystem:
@@ -503,18 +509,17 @@ def main():
   mount_parser.set_defaults(func=subcommand_mount, requires_root=True)
 
   run_parser = subparsers.add_parser('run', help='run command inside image')
-  run_parser.add_argument('--bind', action='append',
+  run_parser.add_argument('--bind', action='append', metavar='PATH:[PATH]',
                           type=functools.partial(valid_mount, read_only=False),
-                          metavar='PATH:[PATH]',
                           help='bind mount a file or directory from the host into the image')
-  run_parser.add_argument('--bind-ro', action='append',
+  run_parser.add_argument('--bind-ro', action='append', metavar='PATH:[PATH]',
                           type=functools.partial(valid_mount, read_only=True),
-                          metavar='PATH:[PATH]',
                           help='similar, but creates a read-only bind mount')
   run_parser.add_argument('--user', '-u', help='run as logged in user')
   run_parser.set_defaults(func=subcommand_run, requires_root=True)
 
-  for p in list_parser, expand_parser, append_parser, delete_parser, mount_parser, run_parser:
+  for p in (list_parser, expand_parser, append_parser, delete_parser,
+            mount_parser, run_parser):
     p.add_argument('--image', '-i', type=existing_file, metavar='FILE',
                    required=True, help='image file (.img)')
 
@@ -527,7 +532,7 @@ def main():
 
   args = parser.parse_args()
   if args.requires_root and os.geteuid() != 0:
-    sys.exit('You need root privileges to run this script, try again using \'sudo\'.')
+    sys.exit("You need root privileges, try again using 'sudo'.")
   args.func(args)
 
 if __name__ == '__main__':
