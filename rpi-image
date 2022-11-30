@@ -422,13 +422,13 @@ def nonempty_str(s):
 def existing_file(s):
   path = pathlib.Path(s)
   if not path.is_file():
-    raise argparse.ArgumentTypeError('file does not exist: %s' % s)
+    raise argparse.ArgumentTypeError(f'file does not exist: {s}')
   return path
 
 def existing_dir(s):
   path = pathlib.Path(s)
   if not path.is_dir():
-    raise argparse.ArgumentTypeError('directory does not exist: %s' % s)
+    raise argparse.ArgumentTypeError(f'directory does not exist: {s}')
   return path
 
 def valid_mount(s, read_only):
@@ -436,6 +436,11 @@ def valid_mount(s, read_only):
     return make_mount(s, read_only)
   except ValueError as e:
     raise argparse.ArgumentTypeError(str(e))
+
+def valid_filesystem(s):
+  if shutil.which(f'mkfs.{s}') is None:
+    raise argparse.ArgumentTypeError(f'invalid filesystem: {s}')
+  return s
 
 UNIT_MULTIPLIER = {
   '': 1,
@@ -498,8 +503,10 @@ def main():
 
   append_parser = subparsers.add_parser('append', help='append partition')
   append_parser.add_argument('--size', '-s', type=append_size, required=True)
-  append_parser.add_argument('--filesystem', '-fs', help='filesystem to create')
-  append_parser.add_argument('--label', '-l', help='partition label')
+  append_parser.add_argument('--filesystem', '-fs', type=valid_filesystem,
+                             help='filesystem to create')
+  append_parser.add_argument('--label', '-l',
+                             help='partition label (when filesystem is created)')
   append_parser.set_defaults(func=subcommand_append, requires_root=True)
 
   delete_parser = subparsers.add_parser('delete', help='delete last partition')
