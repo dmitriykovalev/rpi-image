@@ -16,8 +16,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 '''
 https://wiki.debian.org/RaspberryPi/qemu-user-static
@@ -67,6 +69,11 @@ class Mount:
   host_path: pathlib.Path
   image_path: pathlib.Path
   read_only: bool
+
+@dataclasses.dataclass(frozen=True)
+class Hash:
+  name: str
+  hexdigest: str
 
 def round_up(value, align):
   return align * ((value + align - 1) // align)
@@ -259,19 +266,40 @@ def mount_dir(root_dir):
     with tempfile.TemporaryDirectory() as tmp_dir:
       yield pathlib.Path(tmp_dir)
 
-def copyfileobj_hash(src, dst, hash_class):
-  h = hash_class()
+def copyfileobj(src, dst, data_hash, length=1024 * 1024):
+  if data_hash is None:
+    shutil.copyfileobj(src, dst, length)
+    return
+
+  h = hashlib.new(data_hash.name)
   while True:
-    buf = src.read(1024 * 1024)
+    buf = src.read(length)
     if not buf:
       break
     h.update(buf)
     dst.write(buf)
-  return h.hexdigest()
+
+  hexdigest = h.hexdigest()
+  if hexdigest != data_hash.hexdigest:
+    raise ValueError(f'{data_hash.name.upper()} checksum {hexdigest} is invalid')
+
+def copyfileobj_safe(src, image_file, image_hash):
+  try:
+    with tempfile.NamedTemporaryFile(prefix='rpi-image-', delete=False) as dst:
+      copyfileobj(src, dst, image_hash)
+    shutil.move(dst.name, image_file)
+  except ValueError as e:
+    sys.exit(f'Image file {str(e)}')
+  finally:
+    pathlib.Path(dst.name).unlink(missing_ok=True)
 
 def image_filename(url):
-  path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
-  return pathlib.Path(path).stem
+  p = pathlib.Path(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+  if p.suffix == '.xz':
+    return p.stem, download_extract_xz
+  if p.suffix == '.zip':
+    return p.with_suffix('.img').name, download_extract_zip
+  return p.name, download
 
 def raspios_list(suffix):
   url = 'https://downloads.raspberrypi.org/os_list_imagingutility_v3.json'
@@ -280,7 +308,7 @@ def raspios_list(suffix):
 
   items = [json_data['os_list'][0]]
   items.extend(json_data['os_list'][1]['subitems'])
-  return [item for item in items if suffix in image_filename(item['url'])]
+  return [item for item in items if suffix in image_filename(item['url'])[0]]
 
 def subcommand_urls(args):
   items = raspios_list(args.suffix)
@@ -291,36 +319,59 @@ def subcommand_urls(args):
     for item in items:
       print(','.join(str(item.get(field, '')) for field in fields))
 
+def download_hash(url):
+  for name in 'sha256', 'sha1', 'md5':
+    try:
+      with urllib.request.urlopen(f'{url}.{name}') as response:
+        return Hash(name=name, hexdigest=response.read().decode().split()[0])
+    except urllib.error.HTTPError:
+      pass
+  return None
+
+def download_extract_xz(image_url, image_file, image_hash):
+  with urllib.request.urlopen(image_url) as resp, lzma.open(resp) as src:
+    copyfileobj_safe(src, image_file, image_hash)
+
+def download_extract_zip(image_url, image_file, image_hash):
+  zip_hash = download_hash(image_url)
+
+  with urllib.request.urlopen(image_url) as resp, \
+       tempfile.NamedTemporaryFile(prefix='rpi-image-zip-') as archive:
+    try:
+      copyfileobj(resp, archive, zip_hash)
+    except ValueError as e:
+      sys.exit(f'Archive file {str(e)}')
+
+    with zipfile.ZipFile(archive.name) as zf:
+      names = zf.namelist()
+      if len(names) != 1:
+        sys.exit('There are several files inside the archive instead of one.')
+
+      with zf.open(names[0]) as f:
+        copyfileobj_safe(f, image_file, image_hash)
+
+def download(image_url, image_file, image_hash):
+  with urllib.request.urlopen(image_url) as resp:
+    copyfileobj_safe(resp, image_file, image_url)
+
 def subcommand_download(args):
-  items = raspios_list(args.suffix)
-  if len(items) != 1:
-    sys.exit(f'There are {len(items)} suffix matches instead of one.')
-
-  item = items[0]
-  image_url = item['url']
-  image_file_sha256 = item['extract_sha256']
-
-  if args.output:
-    image_file = args.output
+  if args.url:
+    image_url = args.url
+    image_hash = args.hash
   else:
-    image_file = pathlib.Path(image_filename(image_url))
+    items = raspios_list(args.suffix)
+    if len(items) != 1:
+      sys.exit(f'There are {len(items)} suffix matches instead of one.')
+    image_url = items[0]['url']
+    image_hash = Hash(name='sha256', hexdigest=items[0]['extract_sha256'])
 
+  filename, download = image_filename(image_url)
+
+  image_file = args.output if args.output else pathlib.Path(filename)
   if image_file.exists():
     sys.exit(f"Image file '{image_file}' already exists.")
 
-  with urllib.request.urlopen(image_url) as response:
-    content_type = response.headers['Content-Type']
-    if content_type != 'application/x-xz':
-      sys.exit("Content type '{content_type}' does not match 'application/x-xz'")
-    with lzma.open(response) as src, \
-         tempfile.NamedTemporaryFile(prefix='rpi-image-', delete=False) as dst:
-      dst_sha256 = copyfileobj_hash(src, dst, hashlib.sha256)
-      dst_path = dst.name
-
-  if dst_sha256 != image_file_sha256:
-    sys.exit('Invalid image file SHA-256 checksum.')
-
-  shutil.move(dst_path, image_file)
+  download(image_url, image_file, image_hash)
   print(image_file)
 
 def subcommand_list(args):
@@ -446,6 +497,18 @@ def valid_filesystem(s):
     raise argparse.ArgumentTypeError(f'invalid filesystem: {s}')
   return s
 
+def valid_hash(s):
+  name, hexdigest = s.split(':')
+  try:
+    h = hashlib.new(name)
+  except ValueError as e:
+    raise argparse.ArgumentTypeError(str(e))
+
+  if len(h.hexdigest()) != len(hexdigest):
+    raise argparse.ArgumentTypeError(f'invalid hexdigest length: {hexdigest}')
+
+  return Hash(name, hexdigest)
+
 UNIT_MULTIPLIER = {
   '': 1,
   'K': 1024,
@@ -493,6 +556,8 @@ def main():
   urls_parser.set_defaults(func=subcommand_urls, requires_root=False)
 
   download_parser = subparsers.add_parser('download', help='download image file')
+  download_parser.add_argument('--url', type=str)
+  download_parser.add_argument('--hash', type=valid_hash, metavar='NAME:HEXDIGEST')
   download_parser.add_argument('--output', '-O', type=pathlib.Path,
                                help='image file name')
   download_parser.set_defaults(func=subcommand_download, requires_root=False)
