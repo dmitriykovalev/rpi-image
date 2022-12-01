@@ -38,7 +38,21 @@ Run inside docker container:
   apt-get update && apt-get install -y python3 fdisk
 '''
 
+# package: fdisk
 SFDISK = '/sbin/sfdisk'
+
+# package: util-linux
+BLKID = '/sbin/blkid'
+LSBLK = '/bin/lsblk'
+
+# package: mount
+MOUNT = '/bin/mount'
+UMOUNT = '/bin/umount'
+LOSETUP = '/sbin/losetup'
+
+# package: e2fsprogs
+E2FSK = '/sbin/e2fsck'
+RESIZE2FS = '/sbin/resize2fs'
 
 @dataclasses.dataclass(frozen=True)
 class Partition:
@@ -106,7 +120,7 @@ def umount(mount_point, attempts=5, timeout=0.1):
   while attempts > 0:
     try:
       attempts -= 1
-      return subprocess.run(['umount', mount_point], check=True)
+      return subprocess.run([UMOUNT, mount_point], check=True)
     except subprocess.CalledProcessError:
       time.sleep(timeout)
 
@@ -149,18 +163,18 @@ def mount_point(path, as_file):
 
 @contextlib.contextmanager
 def loop_dev(image_file, offset):
-  cmd = ['losetup', '--find', '--show', '--offset', str(offset), image_file]
+  cmd = [LOSETUP, '--find', '--show', '--offset', str(offset), image_file]
   process = subprocess.run(cmd, capture_output=True, text=True, check=True)
   dev = process.stdout.strip()
   try:
     yield dev
   finally:
-    subprocess.run(['losetup', '--detach', dev], check=True)
+    subprocess.run([LOSETUP, '--detach', dev], check=True)
 
 @contextlib.contextmanager
 def loop_mount(image_file, mount_dir, offset, read_only):
   with loop_dev(image_file, offset) as dev:
-    cmd = ['mount', dev, mount_dir]
+    cmd = [MOUNT, dev, mount_dir]
     if read_only:
       cmd += ['--options', 'ro']
     subprocess.run(cmd, check=True)
@@ -179,7 +193,7 @@ def bind_mount(host_path, image_path, read_only):
     raise ValueError('host path does not exist')
 
   with mount_point(image_path, as_file):
-    cmd = ['mount', '--bind', host_path, image_path]
+    cmd = [MOUNT, '--bind', host_path, image_path]
     if read_only:
       cmd += ['--options', 'ro']
     subprocess.run(cmd, check=True)
@@ -217,7 +231,7 @@ def read_last_partition(image_file):
 def read_filesystem(image_file, offset):
   with loop_dev(image_file, offset) as dev:
     try:
-      stdout = subprocess.run(['blkid', '--probe', '--output', 'export', dev],
+      stdout = subprocess.run([BLKID, '--probe', '--output', 'export', dev],
                               capture_output=True, text=True, check=True).stdout
       return dict(s.split('=') for s in stdout.strip().split('\n'))
     except subprocess.CalledProcessError:
@@ -376,7 +390,7 @@ def subcommand_download(args):
 
 def subcommand_flash(args):
   columns = 'NAME' , 'TYPE', 'FSTYPE' ,'RM', 'TRAN', 'SIZE', 'MOUNTPOINT'
-  cmd = ['lsblk', '--nodeps', '--json', '-o', ','.join(columns)]
+  cmd = [LSBLK, '--nodeps', '--json', '-o', ','.join(columns)]
   stdout = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
   block_devs = json.loads(stdout)['blockdevices']
   block_devs = [dev for dev in block_devs if dev['rm'] and dev['tran'] == 'usb']
@@ -434,9 +448,9 @@ def subcommand_expand(args):
   print('=> Expanding filesystem:')
   with loop_dev(args.image, offset=last_partition.start) as dev:
     print('==> Checking filesystem:')
-    subprocess.run(['e2fsck', '-yf', dev], check=True)
+    subprocess.run([E2FSK, '-yf', dev], check=True)
     print('==> Resizing filesystem:')
-    subprocess.run(['resize2fs', dev], check=True)
+    subprocess.run([RESIZE2FS, dev], check=True)
 
 def subcommand_append(args):
   last_partition = read_last_partition(args.image)
