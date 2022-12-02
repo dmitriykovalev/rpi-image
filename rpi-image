@@ -618,7 +618,9 @@ def append_size(s):
   return int(float(value) * UNIT_MULTIPLIER[unit])
 
 def main():
-  parser = argparse.ArgumentParser(prog='rpi-image')
+  parser = argparse.ArgumentParser(
+      prog='rpi-image',
+      description='Tool to manipulate Raspberry Pi images')
   subparsers = parser.add_subparsers(required=True, dest='subparser_name')
 
   search_parser = subparsers.add_parser('search', help='search for the image')
@@ -629,17 +631,20 @@ def main():
   search_parser.set_defaults(func=subcommand_search, requires_root=False)
 
   download_parser = subparsers.add_parser('download', help='download image file')
-  download_parser.add_argument('--url', type=str)
-  download_parser.add_argument('--hash', type=valid_hash, metavar='NAME:HEXDIGEST')
-  download_parser.add_argument('--extract-hash', type=valid_hash, metavar='NAME:HEXDIGEST')
-  download_parser.add_argument('--no-extract', action='store_true')
+  download_parser.add_argument('--url', metavar='IMAGE_URL', type=str)
+  download_parser.add_argument('--hash', type=valid_hash, metavar='NAME:HEXDIGEST',
+                               help='hash of the downloaded file')
+  download_parser.add_argument('--extract-hash', type=valid_hash, metavar='NAME:HEXDIGEST',
+                               help='hash of the extracted image file')
+  download_parser.add_argument('--no-extract', action='store_true',
+                               help='only download, do not extract image file')
   download_parser.add_argument('--output', '-O', type=pathlib.Path,
                                help='image file name')
   download_parser.set_defaults(func=subcommand_download, requires_root=False)
 
   for p in search_parser, download_parser:
     p.add_argument('--suffix', default='',
-                   help='image name suffix')
+                   help='filter by image name')
     p.add_argument('--recursive', action='store_true',
                    help='recursively download subitems')
 
@@ -668,7 +673,7 @@ def main():
   mount_parser = subparsers.add_parser('mount', help='mount image and run command')
   mount_parser.set_defaults(func=subcommand_mount, requires_root=True)
 
-  run_parser = subparsers.add_parser('run', help='run command inside image')
+  run_parser = subparsers.add_parser('run', help='run command inside the image')
   run_parser.add_argument('--bind', action='append', metavar='PATH:[PATH]',
                           type=functools.partial(valid_mount, read_only=False),
                           help='bind mount a file or directory from the host into the image')
