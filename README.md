@@ -1,10 +1,30 @@
 # rpi-image
 
-## urls
+## search
 
-List available [Raspberry Pi OS](https://www.raspberrypi.com/software/operating-systems/) image file URLs:
+This command uses the same
+[image list](https://downloads.raspberrypi.org/os_list_imagingutility_v3.json) as
+[Raspberry Pi Imager](https://github.com/raspberrypi/rpi-imager).
+
+Latest [Raspberry Pi OS](https://www.raspberrypi.com/software/operating-systems/)
+images:
 ```bash
-./rpi-image urls
+./rpi-image search
+```
+
+Latest images from all vendors (takes some time):
+```bash
+./rpi-image search --recursive
+```
+
+Filter by image filename using `--suffix` option:
+```
+./rpi-image search --suffix buster-armhf-lite
+```
+
+Print detailed information using `--json` option:
+```
+./rpi-image search --suffix buster-armhf-lite --json
 ```
 
 ## download
