@@ -38,6 +38,8 @@ Run inside docker container:
   apt-get update && apt-get install -y python3 fdisk
 '''
 
+OS_LIST_URL = 'https://downloads.raspberrypi.org/os_list_imagingutility_v3.json'
+
 # package: fdisk
 SFDISK = '/sbin/sfdisk'
 
@@ -318,17 +320,33 @@ def image_filename(url, no_extract=False):
 
   return p.name, download_only
 
-def raspios_list(suffix):
-  url = 'https://downloads.raspberrypi.org/os_list_imagingutility_v3.json'
-  with urllib.request.urlopen(url) as f:
-    json_data = json.loads(f.read())
+def download_os_list(url):
+  try:
+    with urllib.request.urlopen(url) as f:
+      return json.loads(f.read())['os_list']
+  except urllib.error.HTTPError:
+    return []
 
-  items = [json_data['os_list'][0]]
-  items.extend(json_data['os_list'][1]['subitems'])
-  return [item for item in items if suffix in image_filename(item['url'])[0]]
+def os_list(download_subitems):
+  queue = [download_os_list(OS_LIST_URL)]
+  while queue:
+    for item in queue.pop(0):
+      if 'subitems' in item:
+        queue.append(item['subitems'])
+      elif 'subitems_url' in item:
+        if download_subitems:
+          queue.append(download_os_list(item['subitems_url']))
+      else:
+        yield item
 
-def subcommand_urls(args):
-  items = raspios_list(args.suffix)
+def filtered_os_list(suffix, download_subitems):
+  for item in os_list(download_subitems):
+    name = image_filename(item['url'], no_extract=True)[0]
+    if suffix in name:
+      yield item
+
+def subcommand_search(args):
+  items = list(filtered_os_list(args.suffix, args.recursive))
   if args.json:
     print(json.dumps(items, indent=2))
   else:
@@ -377,7 +395,7 @@ def subcommand_download(args):
     download_hash = args.hash
     extract_hash = args.extract_hash
   else:
-    items = raspios_list(args.suffix)
+    items = list(filtered_os_list(args.suffix, args.recursive))
     if len(items) != 1:
       sys.exit(f'There are {len(items)} suffix matches instead of one.')
     item = items[0]
@@ -401,8 +419,6 @@ def subcommand_download(args):
     download_hash = find_download_hash(image_url)
 
   download(image_url, image_file, download_hash, extract_hash)
-  print('download_hash: ', download_hash)
-  print('extract_hash: ', extract_hash)
   print(image_file)
 
 def subcommand_flash(args):
@@ -605,12 +621,12 @@ def main():
   parser = argparse.ArgumentParser(prog='rpi-image')
   subparsers = parser.add_subparsers(required=True, dest='subparser_name')
 
-  urls_parser = subparsers.add_parser('urls', help='print image download urls')
-  urls_parser.add_argument('--json', '-J', action='store_true',
-                           help='dump info in JSON format')
-  urls_parser.add_argument('--fields', type=nonempty_str, default='url',
-                           help='comma-separated fields to display')
-  urls_parser.set_defaults(func=subcommand_urls, requires_root=False)
+  search_parser = subparsers.add_parser('search', help='search for the image')
+  search_parser.add_argument('--json', '-J', action='store_true',
+                             help='dump info in JSON format')
+  search_parser.add_argument('--fields', type=nonempty_str, default='url',
+                             help='comma-separated fields to display')
+  search_parser.set_defaults(func=subcommand_search, requires_root=False)
 
   download_parser = subparsers.add_parser('download', help='download image file')
   download_parser.add_argument('--url', type=str)
@@ -621,8 +637,11 @@ def main():
                                help='image file name')
   download_parser.set_defaults(func=subcommand_download, requires_root=False)
 
-  for p in urls_parser, download_parser:
-    p.add_argument('--suffix', default='', help='image name suffix')
+  for p in search_parser, download_parser:
+    p.add_argument('--suffix', default='',
+                   help='image name suffix')
+    p.add_argument('--recursive', action='store_true',
+                   help='recursively download subitems')
 
   flash_parser = subparsers.add_parser('flash', help='flash image to disk')
   flash_parser.add_argument('--dev', help='device to flash')
