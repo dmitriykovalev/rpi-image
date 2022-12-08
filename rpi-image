@@ -91,6 +91,9 @@ class Hash:
   name: str
   hexdigest: str
 
+def run_text(cmd):
+  return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+
 def round_up(value, align):
   return align * ((value + align - 1) // align)
 
@@ -164,26 +167,31 @@ def mount_point(path, as_file):
         shutil.rmtree(existing / missing.parts[0])
 
 @contextlib.contextmanager
-def loop_dev(image_file, offset):
-  cmd = [LOSETUP, '--find', '--show', '--offset', str(offset), image_file]
-  process = subprocess.run(cmd, capture_output=True, text=True, check=True)
-  dev = process.stdout.strip()
+def setup_loop_device(image_file, read_only=False):
+  cmd = [LOSETUP, image_file, '--find', '--show', '--partscan']
+  if read_only:
+    cmd += ['--read-only']
+  dev = run_text(cmd).strip()
+  devs = json.loads(run_text([LSBLK, '--json', dev]))['blockdevices']
+  assert(len(devs) == 1)
+
+  p = re.compile(r'^loop\d+p(?P<num>\d+)$')
+  parts = (part['name'] for part in devs[0]['children'])
   try:
-    yield dev
+    yield {int(p.match(part).group('num')) : f'/dev/{part}' for part in parts}
   finally:
     subprocess.run([LOSETUP, '--detach', dev], check=True)
 
 @contextlib.contextmanager
-def loop_mount(image_file, mount_dir, offset, read_only):
-  with loop_dev(image_file, offset) as dev:
-    cmd = [MOUNT, dev, mount_dir]
-    if read_only:
-      cmd += ['--options', 'ro']
-    subprocess.run(cmd, check=True)
-    try:
-      yield mount_dir
-    finally:
-      umount(mount_dir)
+def mount(dev, mount_dir, read_only):
+  cmd = [MOUNT, dev, mount_dir]
+  if read_only:
+    cmd += ['--options', 'ro']
+  subprocess.run(cmd, check=True)
+  try:
+    yield mount_dir
+  finally:
+    umount(mount_dir)
 
 @contextlib.contextmanager
 def bind_mount(host_path, image_path, read_only):
@@ -204,20 +212,30 @@ def bind_mount(host_path, image_path, read_only):
     finally:
       umount(image_path)
 
-def read_partitions(image_file):
-  output = subprocess.run([SFDISK, '--list-types'],
-                           capture_output=True, text=True, check=True).stdout
-  labels = dict(x.strip().split('  ') for x in output.strip().split('\n')[2:])
+def blkid(dev):
+  try:
+    stdout = run_text([BLKID, '--probe', '--output', 'export', dev])
+    return dict(s.split('=') for s in stdout.strip().split('\n'))
+  except subprocess.CalledProcessError:
+    return {}
 
-  output = subprocess.run([SFDISK, '--json', image_file],
-                          capture_output=True, text=True, check=True).stdout
-  table = json.loads(output)['partitiontable']
+def read_partition_types():
+  output = run_text([SFDISK, '--list-types']).strip()
+  def kv(s):
+    k, v = s.split('  ')
+    return int(k, 16), v
+  return dict(kv(line.strip()) for line in output.split('\n')[2:])
+
+def read_partition_table(image_file):
+  table = json.loads(run_text([SFDISK, '--json', image_file]))['partitiontable']
   sector_size = table.get('sectorsize', 512)
+  types = read_partition_types()
+  print(types)
 
   def partitions():
     for partition in table['partitions']:
       yield Partition(number=int(partition['node'][len(table['device']):]),
-                      type=labels[partition['type']],
+                      type=types[int(partition['type'], 16)],
                       start_sectors=int(partition['start']),
                       size_sectors=int(partition['size']),
                       sector_size=sector_size)
@@ -225,35 +243,17 @@ def read_partitions(image_file):
   return list(partitions())
 
 def read_last_partition(image_file):
-  partitions = read_partitions(image_file)
+  partitions = read_partition_table(image_file)
   if not partitions:
     sys.exit('Image file has no partitions.')
   return partitions[-1]
 
-def read_filesystem(image_file, offset):
-  with loop_dev(image_file, offset) as dev:
-    try:
-      stdout = subprocess.run([BLKID, '--probe', '--output', 'export', dev],
-                              capture_output=True, text=True, check=True).stdout
-      return dict(s.split('=') for s in stdout.strip().split('\n'))
-    except subprocess.CalledProcessError:
-      return {}
-
 @contextlib.contextmanager
 def mount_image(image_file, root_dir, mounts, read_only):
-  partitions = read_partitions(image_file)
-
-  assert(len(partitions) >= 2)
-  boot_partition = partitions[0]
-  assert(boot_partition.number == 1)
-  root_partition = partitions[1]
-  assert(root_partition.number == 2)
-
   with contextlib.ExitStack() as stack:
-    stack.enter_context(loop_mount(image_file, root_dir,
-                                   root_partition.start, read_only))
-    stack.enter_context(loop_mount(image_file, root_dir / 'boot',
-                                   boot_partition.start, read_only))
+    parts = stack.enter_context(setup_loop_device(image_file))
+    stack.enter_context(mount(parts[2], root_dir, read_only))
+    stack.enter_context(mount(parts[1], root_dir / 'boot', read_only))
     for m in mounts:
       stack.enter_context(bind_mount(m.host_path,
                                      root_dir / m.image_path.relative_to('/'),
@@ -423,8 +423,7 @@ def subcommand_download(args):
 
 def subcommand_flash(args):
   columns = 'NAME' , 'TYPE', 'FSTYPE' ,'RM', 'TRAN', 'SIZE', 'MOUNTPOINT'
-  cmd = [LSBLK, '--nodeps', '--json', '-o', ','.join(columns)]
-  stdout = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+  stdout = run_text([LSBLK, '--nodeps', '--json', '-o', ','.join(columns)])
   block_devs = json.loads(stdout)['blockdevices']
   block_devs = [dev for dev in block_devs if dev['rm'] and dev['tran'] == 'usb']
 
@@ -448,10 +447,21 @@ def subcommand_flash(args):
   print(f"\ndd if={args.image} of=/dev/{dev['name']} bs=10m")
 
 def subcommand_list(args):
-  for p in read_partitions(args.image):
-    fs = read_filesystem(args.image, p.start)
-    print(f'#{p.number}: type={p.type}, start={p.start}, end={p.end}, size={p.size},',
-          f"fs_type={fs.get('TYPE', 'N/A')}, fs_label={fs.get('LABEL', 'N/A')}")
+  with setup_loop_device(args.image) as parts:
+    if args.json:
+      # TODO: convert strings to integers, e.g. BLOCK_SIZE.
+      print(json.dumps([blkid(dev) for _, dev in parts.items()]))
+    else:
+      types = read_partition_types()
+      for num, dev in parts.items():
+        info = blkid(dev)
+        part_type = types[int(info['PART_ENTRY_TYPE'][2:], 16)]
+        part_offset = info['PART_ENTRY_OFFSET']
+        part_size = info['PART_ENTRY_SIZE']
+        fs_type = info.get('TYPE', 'N/A')
+        fs_label = info.get('LABEL', 'N/A')
+        print(f'{num}, type={part_type}, offset={part_offset}, size={part_size},',
+              f'fs_type={fs_type}, fs_label={fs_label}')
 
 def subcommand_expand(args):
   last_partition = read_last_partition(args.image)
@@ -475,11 +485,13 @@ def subcommand_expand(args):
   subprocess.run([SFDISK, '-N', str(last_partition.number), args.image],
                  input=', +', text=True, check=True)
 
-  if not read_filesystem(args.image, last_partition.start):
-    return
+  # Expand filesystem on last partition if any.
+  with setup_loop_device(args.image) as parts:
+    dev = parts[max(parts.keys())]
+    if 'TYPE' not in blkid(dev):
+      return
 
-  print('=> Expanding filesystem:')
-  with loop_dev(args.image, offset=last_partition.start) as dev:
+    print('=> Expanding filesystem:')
     print('==> Checking filesystem:')
     subprocess.run([E2FSK, '-yf', dev], check=True)
     print('==> Resizing filesystem:')
@@ -506,14 +518,17 @@ def subcommand_append(args):
     return
 
   print('=> Creating filesystem:')
-  with loop_dev(args.image, offset=last_partition.end) as dev:
+  with setup_loop_device(args.image) as parts:
+    dev = parts[max(parts.keys())]
     cmd = [f'mkfs.{args.filesystem}', dev]
+    if args.block_size:
+      cmd += ['-b', str(args.block_size)]
     if args.label:
       cmd += ['-L', args.label]
     subprocess.run(cmd, check=True)
 
 def subcommand_delete(args):
-  partitions = read_partitions(args.image)
+  partitions = read_partition_table(args.image)
   assert len(partitions) > 2
 
   print('=> Deleting partition:')
@@ -653,6 +668,8 @@ def main():
   flash_parser.set_defaults(func=subcommand_flash, requires_root=True)
 
   list_parser = subparsers.add_parser('list', help='list all partitions')
+  list_parser.add_argument('--json', '-J', action='store_true',
+                           help='dump info in JSON format')
   list_parser.set_defaults(func=subcommand_list, requires_root=True)
 
   expand_parser = subparsers.add_parser('expand', help='expand last partition')
@@ -663,6 +680,8 @@ def main():
   append_parser.add_argument('--size', '-s', type=append_size, required=True)
   append_parser.add_argument('--filesystem', '-fs', type=valid_filesystem,
                              help='filesystem to create')
+  append_parser.add_argument('--block-size', '-b', type=int,
+                             help='filesystem block size (bytes)')
   append_parser.add_argument('--label', '-l',
                              help='partition label (when filesystem is created)')
   append_parser.set_defaults(func=subcommand_append, requires_root=True)
