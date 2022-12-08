@@ -230,7 +230,6 @@ def read_partition_table(image_file):
   table = json.loads(run_text([SFDISK, '--json', image_file]))['partitiontable']
   sector_size = table.get('sectorsize', 512)
   types = read_partition_types()
-  print(types)
 
   def partitions():
     for partition in table['partitions']:
