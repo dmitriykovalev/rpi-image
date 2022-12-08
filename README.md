@@ -18,13 +18,17 @@ Latest images from all vendors (takes some time):
 ```
 
 Filter by image filename using `--suffix` option:
-```
+```bash
 ./rpi-image search --suffix buster-armhf-lite
 ```
 
-Print detailed information using `--json` option:
-```
+Print detailed information using `--json` or `-J` option:
+```bash
 ./rpi-image search --suffix buster-armhf-lite --json
+```
+and use Python interpreter to pretty print:
+```bash
+./rpi-image search --suffix buster-armhf-lite --json | python3 -m json.tool
 ```
 
 ## download

@@ -348,7 +348,7 @@ def filtered_os_list(suffix, download_subitems):
 def subcommand_search(args):
   items = list(filtered_os_list(args.suffix, args.recursive))
   if args.json:
-    print(json.dumps(items, indent=2))
+    print(json.dumps(items))
   else:
     fields = args.fields.split(',')
     for item in items:
