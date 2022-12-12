@@ -281,24 +281,31 @@ def mount_dir(root_dir):
     with tempfile.TemporaryDirectory() as tmp_dir:
       yield pathlib.Path(tmp_dir)
 
-def copyfileobj(src, dst, data_hash, length=1024 * 1024):
+class Hashed:
+  def __init__(self, fp, hash_name):
+    self._fp = fp
+    self._h = hashlib.new(hash_name)
+
+  def hexdigest(self):
+    return self._h.hexdigest()
+
+  def read(self, size=None):
+    buf = self._fp.read(size)
+    self._h.update(buf)
+    return buf
+
+def copyfileobj(src, dst, data_hash):
   if data_hash is None:
-    shutil.copyfileobj(src, dst, length)
+    shutil.copyfileobj(src, dst)
     return
 
-  h = hashlib.new(data_hash.name)
-  while True:
-    buf = src.read(length)
-    if not buf:
-      break
-    h.update(buf)
-    dst.write(buf)
-
-  hexdigest = h.hexdigest()
+  hashed_src = Hashed(src, data_hash.name)
+  shutil.copyfileobj(hashed_src, dst)
+  hexdigest = hashed_src.hexdigest()
   if hexdigest != data_hash.hexdigest:
     raise ValueError(f'{data_hash.name.upper()} checksum {hexdigest} is invalid')
 
-def copyfileobj_safe(src, image_file, image_hash):
+def copyfileobj_atomic(src, image_file, image_hash):
   try:
     with tempfile.NamedTemporaryFile(prefix='rpi-image-', delete=False) as dst:
       copyfileobj(src, dst, image_hash)
@@ -363,11 +370,23 @@ def find_download_hash(url):
   return None
 
 def download_extract_xz(image_url, image_file, download_hash, extract_hash):
-  del download_hash  # cannot check
-  with urllib.request.urlopen(image_url) as resp, lzma.open(resp) as src:
-    copyfileobj_safe(src, image_file, extract_hash)
+  assert download_hash or extract_hash
+
+  with urllib.request.urlopen(image_url) as resp:
+    if download_hash:
+      resp = Hashed(resp, download_hash.name)
+
+    with lzma.open(resp) as src:
+      copyfileobj_atomic(src, image_file, extract_hash)
+
+    if download_hash:
+      hexdigest = resp.hexdigest()
+      if hexdigest != download_hash.hexdigest:
+        sys.exit(f'Archive file {download_hash.name.upper()} checksum {hexdigest} is invalid')
 
 def download_extract_zip(image_url, image_file, download_hash, extract_hash):
+  assert download_hash or extract_hash
+
   with urllib.request.urlopen(image_url) as resp, \
        tempfile.NamedTemporaryFile(prefix='rpi-image-zip-') as archive:
     try:
@@ -381,12 +400,12 @@ def download_extract_zip(image_url, image_file, download_hash, extract_hash):
         sys.exit('There are several files inside the archive instead of one.')
 
       with zf.open(names[0]) as f:
-        copyfileobj_safe(f, image_file, extract_hash)
+        copyfileobj_atomic(f, image_file, extract_hash)
 
 def download_only(image_url, image_file, download_hash, extract_hash):
   del extract_hash  # no extraction
   with urllib.request.urlopen(image_url) as resp:
-    copyfileobj_safe(resp, image_file, download_hash)
+    copyfileobj_atomic(resp, image_file, download_hash)
 
 def subcommand_download(args):
   if args.url:
@@ -416,6 +435,9 @@ def subcommand_download(args):
 
   if not download_hash:
     download_hash = find_download_hash(image_url)
+
+  if not download_hash and not extract_hash:
+    sys.exit('At least one hash should be provided.')
 
   download(image_url, image_file, download_hash, extract_hash)
   print(image_file)
